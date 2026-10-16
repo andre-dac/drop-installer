@@ -308,6 +308,25 @@ class DropInstallerWindow(Gtk.Window):
         self.set_default_size(720, 600)
         self.set_position(Gtk.WindowPosition.CENTER)
 
+        # Desktop Dock & Taskbar Grouping (WM_CLASS must match StartupWMClass in .desktop)
+        self.set_wmclass("drop-installer", "drop-installer")
+        self.set_role("drop-installer")
+        self.set_default_icon_name("drop-installer")
+        self.set_icon_name("drop-installer")
+
+        # Load window icon directly from installed icon files if present
+        base_dir = Path(os.environ.get("DROP_INSTALLER_BASE_DIR", str(Path.home() / ".local")))
+        for icon_cand in (
+            base_dir / "share" / "icons" / "hicolor" / "scalable" / "apps" / "drop-installer.svg",
+            base_dir / "share" / "icons" / "hicolor" / "256x256" / "apps" / "drop-installer.png"
+        ):
+            if icon_cand.exists():
+                try:
+                    self.set_icon_from_file(str(icon_cand))
+                    break
+                except Exception:
+                    pass
+
         # Apply CSS
         self.apply_styles()
 

@@ -12,7 +12,13 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 try:
     import gi
     gi.require_version("Gtk", "3.0")
-    from gi.repository import Gtk
+    gi.require_version("GLib", "2.0")
+    from gi.repository import Gtk, GLib
+
+    # Set process and application name so Pop!_OS and GNOME Shell dock
+    # accurately group the window under drop-installer.desktop rather than "main.py"
+    GLib.set_prgname("drop-installer")
+    GLib.set_application_name("Drop Installer")
 except ImportError as e:
     print(f"Error: Required GTK 3 dependencies not found: {e}", file=sys.stderr)
     print("Please install python3-gi, gir1.2-gtk-3.0.", file=sys.stderr)

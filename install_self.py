@@ -93,11 +93,24 @@ def main():
         if file_name == "main.py":
             os.chmod(dest, 0o755)
 
-    # 2. Write icon
+    # 2. Write icon (both scalable SVG and 256x256 PNG for maximum desktop/dock compatibility)
     icon_file = ICONS_DIR / "drop-installer.svg"
     with open(icon_file, "w", encoding="utf-8") as f:
         f.write(APP_ICON_SVG)
-    print(f"✓ Installed icon to {icon_file}")
+    print(f"✓ Installed SVG icon to {icon_file}")
+
+    png_dir = BASE_DIR / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    png_dir.mkdir(parents=True, exist_ok=True)
+    png_file = png_dir / "drop-installer.png"
+    try:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon_file), 256, 256, True)
+        pixbuf.savev(str(png_file), "png", [], [])
+        print(f"✓ Installed 256x256 PNG icon to {png_file}")
+    except Exception as e:
+        print(f"Note: Could not generate PNG icon: {e}")
 
     # 3. Write desktop file
     desktop_file = APPS_DIR / "drop-installer.desktop"
@@ -122,7 +135,8 @@ def main():
     # 5. Refresh databases
     try:
         subprocess.run(["update-desktop-database", str(APPS_DIR)], check=False)
-        subprocess.run(["gtk-update-icon-cache", "-f", "-t", str(ICONS_DIR.parent.parent.parent)], check=False)
+        hicolor_dir = BASE_DIR / "share" / "icons" / "hicolor"
+        subprocess.run(["gtk-update-icon-cache", "-f", "-t", str(hicolor_dir)], check=False)
     except Exception:
         pass
 
