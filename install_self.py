@@ -86,7 +86,7 @@ def main():
     BIN_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Copy source files to ~/.local/opt/drop-installer
-    for file_name in ("main.py", "ui.py", "inspector.py", "installer.py"):
+    for file_name in ("main.py", "ui.py", "inspector.py", "installer.py", "updater.py"):
         src = SOURCE_DIR / file_name
         dest = TARGET_OPT / file_name
         shutil.copy2(src, dest)

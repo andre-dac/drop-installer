@@ -3,6 +3,7 @@ drop-installer inspector: analyzes dropped files and folders to detect app metad
 executables, icons, and package configuration.
 """
 
+import json
 import os
 import re
 import shutil
@@ -557,6 +558,53 @@ def infer_app_name(raw_name: str) -> str:
     return cleaned.title()
 
 
+def infer_app_version(raw_name: str, root_dir: Optional[Path] = None) -> str:
+    """
+    Attempt to extract a semantic/numeric version string from package metadata files
+    (package.json, product.json, VERSION) or from the filename/folder name.
+    """
+    # 1. Check common metadata files inside extracted/app directory
+    if root_dir and root_dir.exists() and root_dir.is_dir():
+        for json_rel in ("resources/app/package.json", "resources/app/product.json", "package.json", "product.json"):
+            meta_file = root_dir / json_rel
+            if meta_file.is_file():
+                try:
+                    data = json.loads(meta_file.read_text(encoding="utf-8", errors="ignore"))
+                    ver = data.get("version")
+                    if isinstance(ver, str) and ver.strip():
+                        return ver.strip().lstrip("v")
+                except Exception:
+                    pass
+        for ver_rel in ("VERSION", "version", "version.txt"):
+            ver_file = root_dir / ver_rel
+            if ver_file.is_file():
+                try:
+                    first_line = ver_file.read_text(encoding="utf-8", errors="ignore").strip().splitlines()[0].strip()
+                    m = re.search(r"v?(\d+\.\d+(?:\.\d+)*(?:[-+][a-zA-Z0-9.]+)?)", first_line)
+                    if m:
+                        return m.group(1)
+                except Exception:
+                    pass
+
+    # 2. Check filename and unwrapped folder name
+    candidates = [raw_name]
+    if root_dir and root_dir.name != raw_name:
+        candidates.append(root_dir.name)
+
+    for cand_str in candidates:
+        cleaned = cand_str
+        for ext in (".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".txz", ".zip", ".appimage", ".deb", ".tar"):
+            if cleaned.lower().endswith(ext):
+                cleaned = cleaned[:-len(ext)]
+                break
+        cleaned = re.sub(r"[-_](linux|x86_64|x64|amd64|64bit|32bit|arm64|aarch64|bin)", "", cleaned, flags=re.IGNORECASE)
+        m = re.search(r"(?:^|[-_ ])v?(\d+\.\d+(?:\.\d+)*(?:[-+][a-zA-Z0-9.]+)?)", cleaned)
+        if m:
+            return m.group(1)
+
+    return "1.0"
+
+
 def inspect_target(path: Path) -> AppCandidate:
     """
     Main inspection function: examines the target path (archive, folder, AppImage, deb)
@@ -609,7 +657,7 @@ def inspect_target(path: Path) -> AppCandidate:
             kind="appimage",
             app_id=app_id,
             name=app_name,
-            version=desktop_meta.get("X-AppImage-Version", "1.0"),
+            version=desktop_meta.get("X-AppImage-Version") or infer_app_version(path.name),
             comment=desktop_meta.get("Comment", f"{app_name} AppImage"),
             categories=desktop_meta.get("Categories", "Utility;"),
             startup_wm_class=desktop_meta.get("StartupWMClass", app_id),
@@ -642,7 +690,7 @@ def inspect_target(path: Path) -> AppCandidate:
             kind="archive",
             app_id=app_id,
             name=app_name,
-            version=desktop_meta.get("Version", "1.0"),
+            version=infer_app_version(path.name, extracted_root),
             comment=comment,
             categories=category,
             startup_wm_class=wm_class,
@@ -677,7 +725,7 @@ def inspect_target(path: Path) -> AppCandidate:
             kind="folder",
             app_id=app_id,
             name=app_name,
-            version=desktop_meta.get("Version", "1.0"),
+            version=infer_app_version(effective_path.name if effective_path != path else path.name, effective_path),
             comment=comment,
             categories=category,
             startup_wm_class=wm_class,

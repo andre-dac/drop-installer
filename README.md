@@ -21,7 +21,11 @@ Drop any `.tar.gz`, `.zip`, `.AppImage`, `.deb`, or unpacked folder into the win
   - Desktop launchers: `~/.local/share/applications/dropinstall-<app-id>.desktop`
   - Icons: `~/.local/share/icons/hicolor/<size>/apps/`
   - Terminal CLI commands: `~/.local/bin/<app-id>`
-- **Installed Apps Manager**: Built-in tab to launch apps, open their installed folder, edit their launcher icons, or cleanly uninstall them and remove all associated shortcuts.
+- **Installed Apps Manager**: Built-in tab to launch apps, check for updates, update apps in-place, open their installed folder, edit their launcher icons, or cleanly uninstall them and remove all associated shortcuts.
+- **Built-in App Updater**:
+  - **Local In-Place Updates**: Drop a newer archive/AppImage/folder onto Drop Installer or click **Update** on an installed app — atomically replaces files with rollback safety while preserving your custom name, custom icons, companion launchers, and settings.
+  - **Online Update Sources**: Configure **GitHub Releases** (`owner/repo`), a **Direct Download URL** (ETag / Last-Modified tracking), or a **System APT Package** to check for updates and download/install them in one click.
+  - **Smart APT Migration**: Automatically detects if a portable app has an official APT repository configured on your system and lets you migrate cleanly to APT without leaving duplicate launchers behind.
 - **Native Desktop Integration**: Fully compatible with GNOME, Pop!_OS / COSMIC, KDE Plasma, XFCE, and any desktop environment following FreeDesktop XDG specifications.
 
 ---
@@ -99,6 +103,10 @@ You can launch Drop Installer in any of the following ways:
 2. Click the **Edit Icon** button on the target application's row.
 3. In the modal dialog, click **Change Icon…** next to any launcher (primary or companion) to select any image file, or click **Reset** to generate a letter badge.
 
+### Updating Installed Apps
+1. **Local Update**: Either drag and drop a newer version onto the main window (Drop Installer automatically detects the existing install), or click the **Update** button in the **Installed Apps** tab and select/drop the new file or folder.
+2. **Online / APT Updates**: Click the **Update** button on an installed app to configure a **GitHub Releases** repository (`owner/repo`), a **Direct Download URL**, or a **System APT Package**, then use **Check Updates** in the toolbar or **Download & Update** in the dialog.
+
 ---
 
 ## 🧪 Running Tests
@@ -119,9 +127,11 @@ drop-installer/
 ├── ui.py                # GTK 3 user interface and drag-and-drop handlers
 ├── inspector.py         # Archive extraction, executable scoring, icon detection
 ├── installer.py         # XDG path management, desktop entries, manifest & uninstaller
+├── updater.py           # GitHub Releases, Direct URL, and APT update engine
 ├── install_self.py      # Self-installer script
 ├── tests/
-│   └── test_installer.py # Unit and integration test suite
+│   ├── test_installer.py # Installer & inspector tests
+│   └── test_updater.py   # Update engine & migration tests
 ├── .gitignore           # Git ignore rules
 └── README.md            # Project documentation
 ```

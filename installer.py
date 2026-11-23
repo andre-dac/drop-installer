@@ -96,7 +96,7 @@ def refresh_desktop_database():
         
     try:
         subprocess.run(
-            ["gtk-update-icon-cache", "-f", "-t", str(get_icons_dir().parent)],
+            ["gtk-update-icon-cache", "-f", "-t", str(get_icons_dir())],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False
@@ -136,7 +136,8 @@ def install_icon(app_id: str, app_name: str, source_icon_path: Optional[Path]) -
         if ext == ".svg":
             dest = icons_dir / "scalable" / "apps" / f"dropinstall-{app_id}.svg"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_icon_path, dest)
+            if source_icon_path.resolve() != dest.resolve():
+                shutil.copy2(source_icon_path, dest)
             # Remove stale png if exists
             stale_png = icons_dir / "256x256" / "apps" / f"dropinstall-{app_id}.png"
             if stale_png.exists():
@@ -157,7 +158,8 @@ def install_icon(app_id: str, app_name: str, source_icon_path: Optional[Path]) -
                     pass
 
             if ext == ".png":
-                shutil.copy2(source_icon_path, dest)
+                if source_icon_path.resolve() != dest.resolve():
+                    shutil.copy2(source_icon_path, dest)
             else:
                 converted = False
                 try:
@@ -172,7 +174,8 @@ def install_icon(app_id: str, app_name: str, source_icon_path: Optional[Path]) -
                 if not converted:
                     dest = icons_dir / "256x256" / "apps" / f"dropinstall-{app_id}{ext}"
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_icon_path, dest)
+                    if source_icon_path.resolve() != dest.resolve():
+                        shutil.copy2(source_icon_path, dest)
             return dest
     else:
         dest = icons_dir / "scalable" / "apps" / f"dropinstall-{app_id}.svg"
@@ -269,309 +272,15 @@ def install_deb_package(deb_path: Path) -> Tuple[bool, str]:
         return False, f"Failed to execute pkexec: {e}"
 
 
-def install_candidate(
-    candidate: AppCandidate,
-    name: Optional[str] = None,
-    category: Optional[str] = None,
-    executable_rel: Optional[str] = None,
-    icon_source: Optional[Path] = None,
-    use_no_sandbox: bool = False,
-    move_original: bool = False,
-    startup_wm_class: Optional[str] = None,
-    additional_executables: Optional[List[str]] = None
-) -> Tuple[bool, str]:
-    """
-    Installs the inspected candidate into ~/.local/opt/<app_id>/, registers
-    the launcher shortcut, icon, and symlink.
-    """
-    ensure_xdg_directories()
-    app_id = candidate.app_id
-    final_name = name or candidate.name
-    final_category = category or candidate.categories
-    final_wm_class = startup_wm_class if startup_wm_class is not None else candidate.startup_wm_class
-    
-    # 1. DEB Package Handler
-    if candidate.kind == "deb":
-        ok, msg = install_deb_package(candidate.source_path)
-        if ok:
-            manifest = load_manifest()
-            manifest[app_id] = {
-                "app_id": app_id,
-                "name": final_name,
-                "kind": "deb",
-                "version": candidate.version,
-                "package_name": candidate.deb_package_name,
-                "installed_at": datetime.now().isoformat(),
-                "source_path": str(candidate.source_path)
-            }
-            save_manifest(manifest)
-            refresh_desktop_database()
-            if move_original:
-                try:
-                    candidate.source_path.unlink()
-                except OSError:
-                    pass
-        return ok, msg
-
-    # 2. AppImage Handler
-    if candidate.kind == "appimage":
-        target_dir = get_opt_dir() / app_id
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_appimage = target_dir / f"{app_id}.AppImage"
-        
-        if move_original:
-            shutil.move(str(candidate.source_path), str(target_appimage))
-        else:
-            shutil.copy2(str(candidate.source_path), str(target_appimage))
-            
-        os.chmod(target_appimage, os.stat(target_appimage).st_mode | 0o755)
-        
-        # Icon
-        chosen_icon = icon_source or (candidate.selected_icon.path if candidate.selected_icon else None)
-        installed_icon = install_icon(app_id, final_name, chosen_icon)
-        
-        # Executable string
-        exec_str = f'"{target_appimage}"'
-        if use_no_sandbox:
-            exec_str += " --no-sandbox"
-        exec_str += " %U"
-        
-        desktop_file = create_desktop_entry(
-            app_id=app_id,
-            name=final_name,
-            exec_cmd=exec_str,
-            icon_path=installed_icon,
-            categories=final_category,
-            comment=candidate.comment or f"{final_name} AppImage",
-            startup_wm_class=final_wm_class or app_id,
-            work_dir=target_dir
-        )
-        
-        cli_link = create_cli_symlink(app_id, target_appimage)
-        
-        manifest = load_manifest()
-        manifest[app_id] = {
-            "app_id": app_id,
-            "name": final_name,
-            "kind": "appimage",
-            "version": candidate.version,
-            "installed_dir": str(target_dir),
-            "exec_path": str(target_appimage),
-            "desktop_file": str(desktop_file),
-            "icon_path": str(installed_icon),
-            "bin_symlink": str(cli_link),
-            "installed_at": datetime.now().isoformat()
-        }
-        save_manifest(manifest)
-        refresh_desktop_database()
-        return True, f"Installed {final_name} successfully!"
-
-    # 3. Portable Archive or Folder
-    target_dir = get_opt_dir() / app_id
-    if target_dir.exists():
-        # Remove existing older install of same app
-        try:
-            shutil.rmtree(target_dir)
-        except OSError:
-            pass
-
-    if candidate.kind == "archive":
-        # Staged extraction exists
-        if not candidate.extracted_root or not candidate.extracted_root.exists():
-            return False, "Extracted staging directory is missing."
-        shutil.move(str(candidate.extracted_root), str(target_dir))
-        candidate.is_staged = False  # moved, no need to cleanup
-    elif candidate.kind == "folder":
-        folder_to_install = candidate.extracted_root or candidate.source_path
-        # Copy directory tree preserving symlinks (and ensuring new copy is owned by user)
-        shutil.copytree(str(folder_to_install), str(target_dir), symlinks=True)
-
-    # Resolve primary executable inside target_dir
-    exec_relative = executable_rel or (candidate.selected_executable.relative_path if candidate.selected_executable else None)
-    if not exec_relative:
-        return False, "No executable specified or detected."
-        
-    final_exec_path = target_dir / exec_relative
-    if not final_exec_path.exists():
-        return False, f"Executable not found at expected path: {final_exec_path}"
-        
-    # Ensure +x
-    try:
-        os.chmod(final_exec_path, os.stat(final_exec_path).st_mode | 0o755)
-    except OSError:
-        pass
-
-    # Resolve icon
-    chosen_icon = icon_source
-    if not chosen_icon and candidate.selected_icon:
-        # Check if icon is inside the newly moved target_dir
-        candidate_icon_rel = candidate.selected_icon.relative_path
-        inside_icon = target_dir / candidate_icon_rel
-        if inside_icon.exists():
-            chosen_icon = inside_icon
-        elif candidate.selected_icon.path.exists():
-            chosen_icon = candidate.selected_icon.path
-
-    installed_icon = install_icon(app_id, final_name, chosen_icon)
-
-    # Executable command
-    exec_str = f'"{final_exec_path}"'
-    if use_no_sandbox:
-        exec_str += " --no-sandbox"
-    exec_str += " %U"
-
-    desktop_file = create_desktop_entry(
-        app_id=app_id,
-        name=final_name,
-        exec_cmd=exec_str,
-        icon_path=installed_icon,
-        categories=final_category,
-        comment=candidate.comment or f"{final_name} application",
-        startup_wm_class=final_wm_class or app_id,
-        work_dir=target_dir
-    )
-
-    cli_link = create_cli_symlink(app_id, final_exec_path)
-
-    # Install any additional executables as companion launchers (e.g. NetLogo 3D)
-    additional_launchers = []
-    if additional_executables:
-        for add_rel in additional_executables:
-            if not add_rel or add_rel == exec_relative:
-                continue
-            sub_exec_path = target_dir / add_rel
-            if not sub_exec_path.exists():
-                continue
-            try:
-                os.chmod(sub_exec_path, os.stat(sub_exec_path).st_mode | 0o755)
-            except OSError:
-                pass
-
-            sub_file_name = Path(add_rel).name
-            sub_stem = Path(add_rel).stem
-            sub_name = format_executable_display_name(sub_file_name, base_app_name=final_name)
-
-            if sub_stem.lower().startswith(app_id.lower()):
-                sub_id = sanitize_app_id(sub_stem)
-            else:
-                sub_id = sanitize_app_id(f"{app_id}-{sub_stem}")
-
-            # Match dedicated companion icon if available (e.g. NetLogo3D.png for NetLogo3D)
-            sub_stem_clean = re.sub(r"[^a-z0-9]", "", sub_stem.lower())
-            sub_icon_path = None
-            for cand_ic in candidate.icons:
-                cand_ic_stem = re.sub(r"[^a-z0-9]", "", cand_ic.path.stem.lower())
-                if cand_ic_stem == sub_stem_clean:
-                    try:
-                        rel_ic = cand_ic.path.relative_to(candidate.extracted_root or candidate.source_path)
-                        if (target_dir / rel_ic).exists():
-                            sub_icon_path = target_dir / rel_ic
-                        else:
-                            sub_icon_path = cand_ic.path
-                    except Exception:
-                        sub_icon_path = cand_ic.path
-                    break
-
-            sub_installed_icon = install_icon(sub_id, sub_name, sub_icon_path or chosen_icon)
-
-            sub_exec_str = f'"{sub_exec_path}"'
-            if use_no_sandbox:
-                sub_exec_str += " --no-sandbox"
-            sub_exec_str += " %U"
-
-            sub_desktop_file = create_desktop_entry(
-                app_id=sub_id,
-                name=sub_name,
-                exec_cmd=sub_exec_str,
-                icon_path=sub_installed_icon,
-                categories=final_category,
-                comment=f"{sub_name} application",
-                startup_wm_class=sub_id,
-                work_dir=target_dir
-            )
-            sub_cli_link = create_cli_symlink(sub_id, sub_exec_path)
-            additional_launchers.append({
-                "name": sub_name,
-                "app_id": sub_id,
-                "desktop_file": str(sub_desktop_file),
-                "bin_symlink": str(sub_cli_link),
-                "exec_path": str(sub_exec_path),
-                "icon_path": str(sub_installed_icon)
-            })
-
-    # Save manifest and refresh launcher
-    manifest = load_manifest()
-    manifest[app_id] = {
-        "app_id": app_id,
-        "name": final_name,
-        "kind": candidate.kind,
-        "version": candidate.version,
-        "installed_dir": str(target_dir),
-        "exec_path": str(final_exec_path),
-        "desktop_file": str(desktop_file),
-        "icon_path": str(installed_icon),
-        "bin_symlink": str(cli_link),
-        "additional_launchers": additional_launchers,
-        "installed_at": datetime.now().isoformat()
-    }
-    save_manifest(manifest)
-    refresh_desktop_database()
-
-    # Non-fatal source cleanup if requested
-    cleanup_note = ""
-    if move_original:
-        if candidate.kind == "archive" and candidate.source_path.exists():
-            try:
-                candidate.source_path.unlink()
-            except OSError:
-                pass
-        elif candidate.kind == "folder":
-            try:
-                shutil.rmtree(str(folder_to_install))
-                if candidate.source_path != folder_to_install and candidate.source_path.exists():
-                    rem = [p for p in candidate.source_path.iterdir() if not p.name.startswith(".")]
-                    if not rem:
-                        shutil.rmtree(str(candidate.source_path))
-            except PermissionError:
-                cleanup_note = " (Note: Original folder in Documents has root permissions and was preserved; you can safely delete it with sudo rm -rf if desired.)"
-            except OSError:
-                pass
-
-    add_msg = f" (along with {len(additional_launchers)} companion launcher(s))" if additional_launchers else ""
-    return True, f"Installed {final_name}{add_msg} successfully into ~/.local/opt/{app_id}!{cleanup_note}"
-
-
-def uninstall_app(app_id: str) -> Tuple[bool, str]:
-    """
-    Cleanly uninstalls an application: removes desktop entry, icon,
-    CLI symlink, any companion launchers, and ~/.local/opt directory (or runs apt-get remove for deb).
-    """
-    manifest = load_manifest()
-    if app_id not in manifest:
-        return False, f"App ID '{app_id}' not found in manifest."
-        
-    entry = manifest[app_id]
-    kind = entry.get("kind")
-    
-    if kind == "deb":
-        pkg = entry.get("package_name") or app_id
-        cmd = ["pkexec", "apt-get", "remove", "-y", pkg]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-        if res.returncode != 0:
-            return False, f"Apt removal failed:\n{res.stderr or res.stdout}"
-        del manifest[app_id]
-        save_manifest(manifest)
-        refresh_desktop_database()
-        return True, f"Successfully uninstalled deb package {pkg}."
-        
-    # Portable / AppImage / Folder
+def cleanup_portable_files(entry: dict):
+    """Remove portable app directory, desktop entries, icons, and symlinks for a manifest entry."""
     installed_dir = entry.get("installed_dir")
     if installed_dir and Path(installed_dir).exists():
         try:
             shutil.rmtree(installed_dir)
         except OSError:
             pass
-            
+
     desktop_file = entry.get("desktop_file")
     if desktop_file and Path(desktop_file).exists():
         try:
@@ -579,7 +288,6 @@ def uninstall_app(app_id: str) -> Tuple[bool, str]:
         except OSError:
             pass
 
-    # Remove any additional companion launchers
     for sub in entry.get("additional_launchers", []):
         sub_df = sub.get("desktop_file")
         if sub_df and Path(sub_df).exists():
@@ -610,20 +318,439 @@ def uninstall_app(app_id: str) -> Tuple[bool, str]:
                         cand_p.unlink()
                     except OSError:
                         pass
-            
+
     icon_path = entry.get("icon_path")
     if icon_path and Path(icon_path).exists():
         try:
             Path(icon_path).unlink()
         except OSError:
             pass
-            
+
     bin_symlink = entry.get("bin_symlink")
     if bin_symlink and (Path(bin_symlink).is_symlink() or Path(bin_symlink).exists()):
         try:
             Path(bin_symlink).unlink()
         except OSError:
             pass
+
+
+def install_candidate(
+    candidate: AppCandidate,
+    name: Optional[str] = None,
+    category: Optional[str] = None,
+    executable_rel: Optional[str] = None,
+    icon_source: Optional[Path] = None,
+    use_no_sandbox: bool = False,
+    move_original: bool = False,
+    startup_wm_class: Optional[str] = None,
+    additional_executables: Optional[List[str]] = None,
+    target_app_id: Optional[str] = None,
+    preserve_existing_icons: bool = False
+) -> Tuple[bool, str]:
+    """
+    Installs or updates the inspected candidate into ~/.local/opt/<app_id>/, registers
+    the launcher shortcut, icon, and symlink. Uses atomic replacement when updating.
+    """
+    ensure_xdg_directories()
+    app_id = target_app_id or candidate.app_id
+    final_name = name or candidate.name
+    final_category = category or candidate.categories
+    final_wm_class = startup_wm_class if startup_wm_class is not None else candidate.startup_wm_class
+
+    manifest = load_manifest()
+    existing_entry = manifest.get(app_id)
+    is_update = existing_entry is not None
+    existing_update_source = existing_entry.get("update_source") if existing_entry else None
+    original_installed_at = existing_entry.get("installed_at") if existing_entry else None
+    now_iso = datetime.now().isoformat()
+
+    # 1. DEB Package Handler
+    if candidate.kind == "deb":
+        ok, msg = install_deb_package(candidate.source_path)
+        if ok:
+            # If upgrading from a previous portable install, clean up old portable files so they don't shadow APT
+            if existing_entry and existing_entry.get("kind") != "deb":
+                cleanup_portable_files(existing_entry)
+
+            pkg_name = candidate.deb_package_name or app_id
+            update_source = existing_update_source or {"type": "apt", "package_name": pkg_name}
+            entry_data = {
+                "app_id": app_id,
+                "name": final_name,
+                "kind": "deb",
+                "version": candidate.version,
+                "package_name": pkg_name,
+                "update_source": update_source,
+                "installed_at": original_installed_at or now_iso,
+                "source_path": str(candidate.source_path)
+            }
+            if is_update:
+                entry_data["updated_at"] = now_iso
+            manifest[app_id] = entry_data
+            save_manifest(manifest)
+            refresh_desktop_database()
+            if move_original:
+                try:
+                    candidate.source_path.unlink()
+                except OSError:
+                    pass
+        return ok, msg
+
+    # 2. AppImage Handler
+    if candidate.kind == "appimage":
+        target_dir = get_opt_dir() / app_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_appimage = target_dir / f"{app_id}.AppImage"
+        temp_appimage = target_dir / f".{app_id}.AppImage.new.{int(time.time() * 1000)}"
+
+        try:
+            shutil.copy2(str(candidate.source_path), str(temp_appimage))
+            os.chmod(temp_appimage, os.stat(temp_appimage).st_mode | 0o755)
+            os.replace(str(temp_appimage), str(target_appimage))
+        except Exception as e:
+            if temp_appimage.exists():
+                try:
+                    temp_appimage.unlink()
+                except OSError:
+                    pass
+            return False, f"Failed to install AppImage: {e}"
+
+        if move_original and candidate.source_path.exists() and candidate.source_path.resolve() != target_appimage.resolve():
+            try:
+                candidate.source_path.unlink()
+            except OSError:
+                pass
+
+        # Icon (preserve custom/existing icon on update if requested)
+        chosen_icon = icon_source
+        kept_custom_icon = False
+        if not chosen_icon and existing_entry and (preserve_existing_icons or existing_entry.get("custom_icon")):
+            prev_icon = existing_entry.get("icon_path")
+            if prev_icon and Path(prev_icon).exists():
+                chosen_icon = Path(prev_icon)
+                kept_custom_icon = bool(existing_entry.get("custom_icon"))
+        if not chosen_icon and candidate.selected_icon:
+            chosen_icon = candidate.selected_icon.path
+
+        installed_icon = install_icon(app_id, final_name, chosen_icon)
+
+        # Executable string
+        exec_str = f'"{target_appimage}"'
+        if use_no_sandbox:
+            exec_str += " --no-sandbox"
+        exec_str += " %U"
+
+        desktop_file = create_desktop_entry(
+            app_id=app_id,
+            name=final_name,
+            exec_cmd=exec_str,
+            icon_path=installed_icon,
+            categories=final_category,
+            comment=candidate.comment or f"{final_name} AppImage",
+            startup_wm_class=final_wm_class or app_id,
+            work_dir=target_dir
+        )
+
+        cli_link = create_cli_symlink(app_id, target_appimage)
+
+        entry_data = {
+            "app_id": app_id,
+            "name": final_name,
+            "kind": "appimage",
+            "version": candidate.version,
+            "category": final_category,
+            "use_no_sandbox": use_no_sandbox,
+            "startup_wm_class": final_wm_class or app_id,
+            "installed_dir": str(target_dir),
+            "exec_path": str(target_appimage),
+            "desktop_file": str(desktop_file),
+            "icon_path": str(installed_icon),
+            "bin_symlink": str(cli_link),
+            "installed_at": original_installed_at or now_iso
+        }
+        if kept_custom_icon:
+            entry_data["custom_icon"] = True
+        if existing_update_source:
+            entry_data["update_source"] = existing_update_source
+        if is_update:
+            entry_data["updated_at"] = now_iso
+
+        manifest[app_id] = entry_data
+        save_manifest(manifest)
+        refresh_desktop_database()
+        action_word = "Updated" if is_update else "Installed"
+        return True, f"{action_word} {final_name} (v{candidate.version}) successfully!"
+
+    # 3. Portable Archive or Folder (with atomic swap & rollback on failure)
+    exec_relative = executable_rel or (candidate.selected_executable.relative_path if candidate.selected_executable else None)
+    if not exec_relative:
+        return False, "No executable specified or detected."
+
+    target_dir = get_opt_dir() / app_id
+    ts_suffix = int(time.time() * 1000)
+    staging_target = get_opt_dir() / f".{app_id}.new.{ts_suffix}"
+    backup_dir = get_opt_dir() / f".{app_id}.bak.{ts_suffix}"
+    folder_to_install = candidate.extracted_root or candidate.source_path
+
+    try:
+        if candidate.kind == "archive":
+            if not candidate.extracted_root or not candidate.extracted_root.exists():
+                return False, "Extracted staging directory is missing."
+            shutil.move(str(candidate.extracted_root), str(staging_target))
+            candidate.is_staged = False  # moved, no need to cleanup
+        elif candidate.kind == "folder":
+            shutil.copytree(str(folder_to_install), str(staging_target), symlinks=True)
+
+        # Verify executable exists in staged copy BEFORE replacing old install
+        staged_exec = staging_target / exec_relative
+        if not staged_exec.exists():
+            shutil.rmtree(staging_target, ignore_errors=True)
+            return False, f"Executable not found at expected path: {exec_relative}"
+
+        # Atomic swap: existing -> backup, staging -> target
+        had_existing_dir = target_dir.exists()
+        if had_existing_dir:
+            os.rename(str(target_dir), str(backup_dir))
+        try:
+            os.rename(str(staging_target), str(target_dir))
+        except Exception as swap_err:
+            if had_existing_dir and backup_dir.exists() and not target_dir.exists():
+                try:
+                    os.rename(str(backup_dir), str(target_dir))
+                except OSError:
+                    pass
+            shutil.rmtree(staging_target, ignore_errors=True)
+            return False, f"Failed to swap application directory: {swap_err}"
+
+        # Remove backup directory (non-fatal)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+    except Exception as e:
+        shutil.rmtree(staging_target, ignore_errors=True)
+        return False, f"Failed to install application files: {e}"
+
+    final_exec_path = target_dir / exec_relative
+    # Ensure +x
+    try:
+        os.chmod(final_exec_path, os.stat(final_exec_path).st_mode | 0o755)
+    except OSError:
+        pass
+
+    # Resolve icon (preserve custom/existing icon on update if requested)
+    chosen_icon = icon_source
+    kept_custom_icon = False
+    if not chosen_icon and existing_entry and (preserve_existing_icons or existing_entry.get("custom_icon")):
+        prev_icon = existing_entry.get("icon_path")
+        if prev_icon and Path(prev_icon).exists():
+            chosen_icon = Path(prev_icon)
+            kept_custom_icon = bool(existing_entry.get("custom_icon"))
+    if not chosen_icon and candidate.selected_icon:
+        # Check if icon is inside the newly moved target_dir
+        candidate_icon_rel = candidate.selected_icon.relative_path
+        inside_icon = target_dir / candidate_icon_rel
+        if inside_icon.exists():
+            chosen_icon = inside_icon
+        elif candidate.selected_icon.path.exists():
+            chosen_icon = candidate.selected_icon.path
+
+    installed_icon = install_icon(app_id, final_name, chosen_icon)
+
+    # Executable command
+    exec_str = f'"{final_exec_path}"'
+    if use_no_sandbox:
+        exec_str += " --no-sandbox"
+    exec_str += " %U"
+
+    desktop_file = create_desktop_entry(
+        app_id=app_id,
+        name=final_name,
+        exec_cmd=exec_str,
+        icon_path=installed_icon,
+        categories=final_category,
+        comment=candidate.comment or f"{final_name} application",
+        startup_wm_class=final_wm_class or app_id,
+        work_dir=target_dir
+    )
+
+    cli_link = create_cli_symlink(app_id, final_exec_path)
+
+    # Index any existing companion launcher icons so custom companion icons are preserved on update
+    existing_subs_by_id = {}
+    if existing_entry:
+        for old_sub in existing_entry.get("additional_launchers", []):
+            if old_sub.get("app_id"):
+                existing_subs_by_id[old_sub["app_id"]] = old_sub
+
+    # Install any additional executables as companion launchers (e.g. NetLogo 3D)
+    additional_launchers = []
+    new_sub_ids = set()
+    if additional_executables:
+        for add_rel in additional_executables:
+            if not add_rel or add_rel == exec_relative:
+                continue
+            sub_exec_path = target_dir / add_rel
+            if not sub_exec_path.exists():
+                continue
+            try:
+                os.chmod(sub_exec_path, os.stat(sub_exec_path).st_mode | 0o755)
+            except OSError:
+                pass
+
+            sub_file_name = Path(add_rel).name
+            sub_stem = Path(add_rel).stem
+            sub_name = format_executable_display_name(sub_file_name, base_app_name=final_name)
+
+            if sub_stem.lower().startswith(app_id.lower()):
+                sub_id = sanitize_app_id(sub_stem)
+            else:
+                sub_id = sanitize_app_id(f"{app_id}-{sub_stem}")
+            new_sub_ids.add(sub_id)
+
+            old_sub = existing_subs_by_id.get(sub_id)
+            sub_icon_path = None
+            kept_sub_custom_icon = False
+            if old_sub and (preserve_existing_icons or old_sub.get("custom_icon")):
+                prev_sub_ic = old_sub.get("icon_path")
+                if prev_sub_ic and Path(prev_sub_ic).exists():
+                    sub_icon_path = Path(prev_sub_ic)
+                    kept_sub_custom_icon = bool(old_sub.get("custom_icon"))
+
+            if not sub_icon_path:
+                # Match dedicated companion icon if available (e.g. NetLogo3D.png for NetLogo3D)
+                sub_stem_clean = re.sub(r"[^a-z0-9]", "", sub_stem.lower())
+                for cand_ic in candidate.icons:
+                    cand_ic_stem = re.sub(r"[^a-z0-9]", "", cand_ic.path.stem.lower())
+                    if cand_ic_stem == sub_stem_clean:
+                        try:
+                            rel_ic = cand_ic.path.relative_to(candidate.extracted_root or candidate.source_path)
+                            if (target_dir / rel_ic).exists():
+                                sub_icon_path = target_dir / rel_ic
+                            else:
+                                sub_icon_path = cand_ic.path
+                        except Exception:
+                            sub_icon_path = cand_ic.path
+                        break
+
+            sub_installed_icon = install_icon(sub_id, sub_name, sub_icon_path or chosen_icon)
+
+            sub_exec_str = f'"{sub_exec_path}"'
+            if use_no_sandbox:
+                sub_exec_str += " --no-sandbox"
+            sub_exec_str += " %U"
+
+            sub_desktop_file = create_desktop_entry(
+                app_id=sub_id,
+                name=sub_name,
+                exec_cmd=sub_exec_str,
+                icon_path=sub_installed_icon,
+                categories=final_category,
+                comment=f"{sub_name} application",
+                startup_wm_class=sub_id,
+                work_dir=target_dir
+            )
+            sub_cli_link = create_cli_symlink(sub_id, sub_exec_path)
+            sub_entry = {
+                "name": sub_name,
+                "app_id": sub_id,
+                "desktop_file": str(sub_desktop_file),
+                "bin_symlink": str(sub_cli_link),
+                "exec_path": str(sub_exec_path),
+                "icon_path": str(sub_installed_icon)
+            }
+            if kept_sub_custom_icon:
+                sub_entry["custom_icon"] = True
+            additional_launchers.append(sub_entry)
+
+    # Clean up stale companion launchers removed during an update
+    if existing_entry:
+        for old_sub_id, old_sub in existing_subs_by_id.items():
+            if old_sub_id not in new_sub_ids:
+                for path_key in ("desktop_file", "bin_symlink", "icon_path"):
+                    old_p = old_sub.get(path_key)
+                    if old_p and (Path(old_p).exists() or Path(old_p).is_symlink()):
+                        try:
+                            Path(old_p).unlink()
+                        except OSError:
+                            pass
+
+    # Save manifest and refresh launcher
+    entry_data = {
+        "app_id": app_id,
+        "name": final_name,
+        "kind": candidate.kind,
+        "version": candidate.version,
+        "category": final_category,
+        "use_no_sandbox": use_no_sandbox,
+        "startup_wm_class": final_wm_class or app_id,
+        "installed_dir": str(target_dir),
+        "exec_path": str(final_exec_path),
+        "desktop_file": str(desktop_file),
+        "icon_path": str(installed_icon),
+        "bin_symlink": str(cli_link),
+        "additional_launchers": additional_launchers,
+        "installed_at": original_installed_at or now_iso
+    }
+    if kept_custom_icon:
+        entry_data["custom_icon"] = True
+    if existing_update_source:
+        entry_data["update_source"] = existing_update_source
+    if is_update:
+        entry_data["updated_at"] = now_iso
+
+    manifest[app_id] = entry_data
+    save_manifest(manifest)
+    refresh_desktop_database()
+
+    # Non-fatal source cleanup if requested
+    cleanup_note = ""
+    if move_original:
+        if candidate.kind == "archive" and candidate.source_path.exists():
+            try:
+                candidate.source_path.unlink()
+            except OSError:
+                pass
+        elif candidate.kind == "folder":
+            try:
+                shutil.rmtree(str(folder_to_install))
+                if candidate.source_path != folder_to_install and candidate.source_path.exists():
+                    rem = [p for p in candidate.source_path.iterdir() if not p.name.startswith(".")]
+                    if not rem:
+                        shutil.rmtree(str(candidate.source_path))
+            except PermissionError:
+                cleanup_note = " (Note: Original folder has root permissions and was preserved; you can safely delete it with sudo rm -rf if desired.)"
+            except OSError:
+                pass
+
+    add_msg = f" (along with {len(additional_launchers)} companion launcher(s))" if additional_launchers else ""
+    action_word = "Updated" if is_update else "Installed"
+    return True, f"{action_word} {final_name}{add_msg} successfully into ~/.local/opt/{app_id}!{cleanup_note}"
+
+
+def uninstall_app(app_id: str) -> Tuple[bool, str]:
+    """
+    Cleanly uninstalls an application: removes desktop entry, icon,
+    CLI symlink, any companion launchers, and ~/.local/opt directory (or runs apt-get remove for deb).
+    """
+    manifest = load_manifest()
+    if app_id not in manifest:
+        return False, f"App ID '{app_id}' not found in manifest."
+        
+    entry = manifest[app_id]
+    kind = entry.get("kind")
+    
+    if kind == "deb":
+        pkg = entry.get("package_name") or app_id
+        cmd = ["pkexec", "apt-get", "remove", "-y", pkg]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        if res.returncode != 0:
+            return False, f"Apt removal failed:\n{res.stderr or res.stdout}"
+        del manifest[app_id]
+        save_manifest(manifest)
+        refresh_desktop_database()
+        return True, f"Successfully uninstalled deb package {pkg}."
+        
+    # Portable / AppImage / Folder
+    cleanup_portable_files(entry)
             
     del manifest[app_id]
     save_manifest(manifest)
@@ -804,8 +931,10 @@ def update_launcher_icon(
             return False, f"Could not update desktop file: {e}", None
 
     # Update manifest.json
+    is_custom = new_icon_source is not None
     if is_main:
         entry["icon_path"] = str(installed_icon)
+        entry["custom_icon"] = is_custom
     else:
         found_in_manifest = False
         if "additional_launchers" not in entry:
@@ -813,6 +942,7 @@ def update_launcher_icon(
         for sub in entry["additional_launchers"]:
             if (target_sub_id and sub.get("app_id") == target_sub_id) or (desktop_file and sub.get("desktop_file") == str(desktop_file)):
                 sub["icon_path"] = str(installed_icon)
+                sub["custom_icon"] = is_custom
                 found_in_manifest = True
                 break
         if not found_in_manifest:
@@ -820,10 +950,140 @@ def update_launcher_icon(
                 "name": target_name,
                 "app_id": icon_id,
                 "desktop_file": str(desktop_file) if desktop_file else "",
-                "icon_path": str(installed_icon)
+                "icon_path": str(installed_icon),
+                "custom_icon": is_custom
             })
 
     save_manifest(manifest)
     refresh_desktop_database()
 
     return True, f"Updated icon for {target_name} successfully!", installed_icon
+
+
+def find_matching_installed_app(candidate: AppCandidate) -> Optional[dict]:
+    """
+    Check if a newly inspected candidate matches an already installed app in manifest.json.
+    Matches by app_id, Debian package_name, or sanitized display name.
+    """
+    manifest = load_manifest()
+    if candidate.app_id in manifest:
+        return manifest[candidate.app_id]
+
+    for app_id, entry in manifest.items():
+        if candidate.kind == "deb" and candidate.deb_package_name:
+            if entry.get("package_name") == candidate.deb_package_name:
+                return entry
+        entry_name_slug = sanitize_app_id(entry.get("name", ""))
+        if entry_name_slug and entry_name_slug == candidate.app_id:
+            return entry
+
+    return None
+
+
+def parse_installed_settings(entry: dict) -> dict:
+    """
+    Recover category, use_no_sandbox, startup_wm_class, and executable relative path
+    from a manifest entry, falling back to parsing its .desktop file for older entries.
+    """
+    settings = {
+        "name": entry.get("name", entry.get("app_id", "")),
+        "category": entry.get("category", ""),
+        "use_no_sandbox": entry.get("use_no_sandbox"),
+        "startup_wm_class": entry.get("startup_wm_class", ""),
+        "exec_rel": None,
+        "companion_rels": []
+    }
+
+    installed_dir = entry.get("installed_dir")
+    exec_path = entry.get("exec_path")
+    if installed_dir and exec_path:
+        try:
+            settings["exec_rel"] = str(Path(exec_path).relative_to(Path(installed_dir)))
+        except ValueError:
+            pass
+
+        for sub in entry.get("additional_launchers", []):
+            sub_exec = sub.get("exec_path")
+            if sub_exec:
+                try:
+                    settings["companion_rels"].append(str(Path(sub_exec).relative_to(Path(installed_dir))))
+                except ValueError:
+                    pass
+
+    desktop_file = entry.get("desktop_file")
+    if desktop_file and Path(desktop_file).exists():
+        try:
+            for line in Path(desktop_file).read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("Categories=") and not settings["category"]:
+                    settings["category"] = line.split("=", 1)[1].strip()
+                elif line.startswith("Exec=") and settings["use_no_sandbox"] is None:
+                    settings["use_no_sandbox"] = "--no-sandbox" in line
+                elif line.startswith("StartupWMClass=") and not settings["startup_wm_class"]:
+                    settings["startup_wm_class"] = line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+
+    if settings["use_no_sandbox"] is None:
+        settings["use_no_sandbox"] = False
+    return settings
+
+
+def update_installed_app(
+    app_id: str,
+    new_candidate: AppCandidate,
+    preserve_settings: bool = True,
+    move_original: bool = False
+) -> Tuple[bool, str]:
+    """
+    Updates an existing installed application in-place with a newly inspected candidate.
+    When preserve_settings=True, retains the user's custom name, custom icons, category,
+    --no-sandbox flag, companion launcher choices, and update source configuration.
+    """
+    manifest = load_manifest()
+    if app_id not in manifest:
+        return False, f"App ID '{app_id}' not found in manifest."
+
+    existing_entry = manifest[app_id]
+    old_settings = parse_installed_settings(existing_entry)
+
+    final_name = old_settings["name"] if preserve_settings and old_settings["name"] else new_candidate.name
+    final_category = old_settings["category"] if preserve_settings and old_settings["category"] else new_candidate.categories
+    final_no_sandbox = old_settings["use_no_sandbox"] if preserve_settings else new_candidate.is_electron
+    final_wm_class = old_settings["startup_wm_class"] if preserve_settings and old_settings["startup_wm_class"] else new_candidate.startup_wm_class
+
+    # Map existing primary executable relative path if it still exists in the new version
+    exec_rel = None
+    avail_rels = {c.relative_path for c in new_candidate.executables}
+    if preserve_settings and old_settings["exec_rel"] and old_settings["exec_rel"] in avail_rels:
+        exec_rel = old_settings["exec_rel"]
+    elif new_candidate.selected_executable:
+        exec_rel = new_candidate.selected_executable.relative_path
+
+    # Map existing companion launchers onto new candidate executables
+    additional_execs = []
+    if preserve_settings and old_settings["companion_rels"]:
+        for rel in old_settings["companion_rels"]:
+            if rel in avail_rels and rel != exec_rel:
+                additional_execs.append(rel)
+    elif new_candidate.kind in ("archive", "folder"):
+        for cand in new_candidate.executables:
+            if cand.relative_path == exec_rel:
+                continue
+            is_script = cand.name.endswith(".sh") or cand.is_script
+            is_headless = "headless" in cand.name.lower()
+            if not is_script and not is_headless and any(k in cand.name.lower() for k in ("3d", "client", "search")):
+                additional_execs.append(cand.relative_path)
+
+    return install_candidate(
+        new_candidate,
+        name=final_name,
+        category=final_category,
+        executable_rel=exec_rel,
+        icon_source=None,
+        use_no_sandbox=final_no_sandbox,
+        move_original=move_original,
+        startup_wm_class=final_wm_class,
+        additional_executables=additional_execs,
+        target_app_id=app_id,
+        preserve_existing_icons=preserve_settings
+    )
