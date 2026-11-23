@@ -821,17 +821,30 @@ def get_app_launchers(app_id: str) -> List[Dict[str, Any]]:
             "exec_path": str(sub.get("exec_path", ""))
         })
 
-    # 3. Discover any unrecorded companion .desktop files matching dropinstall-{app_id}-*.desktop
+    # 3. Discover any unrecorded companion .desktop files matching dropinstall-{app_id}*.desktop
+    # Exclude desktop files owned by other independent top-level apps in manifest (e.g. 'foo' vs 'foo-ide')
+    other_app_desktops = set()
+    for other_id, other_entry in manifest.items():
+        if other_id == app_id:
+            continue
+        if other_entry.get("desktop_file"):
+            other_app_desktops.add(str(other_entry["desktop_file"]))
+        for other_sub in other_entry.get("additional_launchers", []):
+            if other_sub.get("desktop_file"):
+                other_app_desktops.add(str(other_sub["desktop_file"]))
+
+    installed_dir = entry.get("installed_dir") or ""
     apps_dir = get_apps_dir()
     if apps_dir.exists():
         for df in sorted(apps_dir.glob(f"dropinstall-{app_id}*.desktop")):
             df_str = str(df)
-            if df_str in seen_desktop_files:
+            sub_id = df.stem.replace("dropinstall-", "")
+            if df_str in seen_desktop_files or df_str in other_app_desktops or sub_id in manifest:
                 continue
-            seen_desktop_files.add(df_str)
             df_name = df.stem
             df_icon = ""
             df_exec = ""
+            df_path = ""
             for line in df.read_text(encoding="utf-8", errors="ignore").splitlines():
                 if line.startswith("Name="):
                     df_name = line.split("=", 1)[1].strip()
@@ -839,7 +852,14 @@ def get_app_launchers(app_id: str) -> List[Dict[str, Any]]:
                     df_icon = line.split("=", 1)[1].strip()
                 elif line.startswith("Exec="):
                     df_exec = line.split("=", 1)[1].strip()
-            sub_id = df.stem.replace("dropinstall-", "")
+                elif line.startswith("Path="):
+                    df_path = line.split("=", 1)[1].strip()
+            # Ensure this desktop entry actually belongs to the same installed directory
+            if installed_dir and df_path and Path(df_path) != Path(installed_dir):
+                continue
+            if installed_dir and not df_path and installed_dir not in df_exec:
+                continue
+            seen_desktop_files.add(df_str)
             launchers.append({
                 "name": df_name,
                 "app_id": sub_id,

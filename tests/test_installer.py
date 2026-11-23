@@ -405,6 +405,35 @@ class TestInspectorAndInstaller(unittest.TestCase):
         self.assertFalse(c_path.exists())
         self.assertFalse(r_path.exists())
 
+    def test_prefix_overlapping_apps_not_treated_as_companions(self):
+        """Independent apps sharing an app_id prefix (e.g. mytool and mytool-ide) must stay separate."""
+        dir_a = self.temp_dir / "MyTool"
+        dir_a.mkdir()
+        bin_a = dir_a / "mytool"
+        bin_a.write_text("#!/bin/bash\necho a\n", encoding="utf-8")
+        os.chmod(bin_a, 0o755)
+
+        dir_b = self.temp_dir / "MyTool IDE"
+        dir_b.mkdir()
+        bin_b = dir_b / "mytool-ide"
+        bin_b.write_text("#!/bin/bash\necho b\n", encoding="utf-8")
+        os.chmod(bin_b, 0o755)
+
+        cand_a = inspect_target(dir_a)
+        cand_b = inspect_target(dir_b)
+        self.assertTrue(install_candidate(cand_a, name="MyTool")[0])
+        self.assertTrue(install_candidate(cand_b, name="MyTool IDE")[0])
+
+        launchers_a = get_app_launchers("mytool")
+        launchers_b = get_app_launchers("mytool-ide")
+        self.assertEqual(len(launchers_a), 1)
+        self.assertEqual(launchers_a[0]["app_id"], "mytool")
+        self.assertEqual(len(launchers_b), 1)
+        self.assertEqual(launchers_b[0]["app_id"], "mytool-ide")
+
+        uninstall_app("mytool")
+        uninstall_app("mytool-ide")
+
 
 if __name__ == "__main__":
     unittest.main()
